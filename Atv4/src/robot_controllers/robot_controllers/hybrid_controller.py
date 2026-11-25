@@ -8,6 +8,7 @@ from sensor_msgs.msg import LaserScan
 
 
 def trimf(x: float, a: float, b: float, c: float) -> float:
+    # Pertinência triangular normalizada entre 0 e 1 para as regras fuzzy.
     if x <= a or x >= c:
         return 0.0
     if x == b:
@@ -18,6 +19,7 @@ def trimf(x: float, a: float, b: float, c: float) -> float:
 
 
 def trapmf(x: float, a: float, b: float, c: float, d: float) -> float:
+    # Pertinência trapezoidal permite platô de ativação total entre b e c.
     if x <= a or x >= d:
         return 0.0
     if b <= x <= c:
@@ -31,6 +33,7 @@ class HybridPidFuzzyController(Node):
     def __init__(self):
         super().__init__('hybrid_pid_fuzzy_controller')
 
+        # Meta XY configurável; odometria estima pose e LiDAR mede obstáculos próximos.
         self.declare_parameter('goal_x', 1.5)
         self.declare_parameter('goal_y', 0.5)
         self.goal_x = float(self.get_parameter('goal_x').value)
@@ -42,7 +45,7 @@ class HybridPidFuzzyController(Node):
             LaserScan, '/scan', self.scan_cb, qos_profile_sensor_data
         )
 
-        # Estado de odometria e LiDAR
+        # Estado atualizado pelos callbacks de /odom e /scan.
         self.x = None
         self.y = None
         self.yaw = 0.0
@@ -51,14 +54,14 @@ class HybridPidFuzzyController(Node):
         self.right_dist = 3.5
         self.goal_reached = False
 
-        # Limiares calibrados para não disparar cedo nem travar em giro
+        # Histerese entre limiares evita alternância rápida PID/Fuzzy perto do mesmo limite.
         self.enter_fuzzy_dist = 0.42   # Só entra em Fuzzy abaixo de 0.42 m
         self.exit_fuzzy_dist = 0.52    # Volta ao PID acima de 0.52 m
         self.mode = 'PID'
         self.avoid_dir = 1.0
         self.fuzzy_hold_ticks = 0      # Tempo mínimo contornando o pilar
 
-        # Ganhos PID
+        # Ganhos P, I e D para erro de distância e de orientação; dt é o período do controle.
         self.kp_lin, self.ki_lin, self.kd_lin = 0.50, 0.02, 0.10
         self.kp_ang, self.ki_ang, self.kd_ang = 1.50, 0.05, 0.20
         self.int_dist = 0.0
@@ -74,6 +77,7 @@ class HybridPidFuzzyController(Node):
         )
 
     def odom_cb(self, msg: Odometry):
+        # Guarda a posição odométrica e converte a quaternion em yaw.
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
         q = msg.pose.pose.orientation
@@ -83,6 +87,7 @@ class HybridPidFuzzyController(Node):
         )
 
     def scan_cb(self, msg: LaserScan):
+        # Filtra ranges inválidos e divide a varredura em setores frontal e laterais.
         front, left, right = [], [], []
         for i, d in enumerate(msg.ranges):
             if math.isinf(d) or math.isnan(d) or d < msg.range_min or d > msg.range_max:
@@ -91,7 +96,7 @@ class HybridPidFuzzyController(Node):
                 math.sin(msg.angle_min + i * msg.angle_increment),
                 math.cos(msg.angle_min + i * msg.angle_increment)
             )
-            # Corredor frontal estreito (±20°) para evitar falsos positivos laterais
+            # O setor frontal estreito reduz disparos por obstáculos que estão apenas ao lado.
             if -0.35 <= a <= 0.35:
                 front.append(d)
             elif 0.35 < a <= 1.40:
@@ -112,6 +117,7 @@ class HybridPidFuzzyController(Node):
         self.cmd_pub.publish(cmd)
 
     def compute_pid_position(self, dist_err: float, ang_err: float):
+        # Integrais limitadas reduzem windup; derivadas usam a variação do erro por dt.
         self.int_dist = max(-0.5, min(0.5, self.int_dist + dist_err * self.dt))
         der_dist = (dist_err - self.prev_dist) / self.dt
         self.prev_dist = dist_err
@@ -123,6 +129,7 @@ class HybridPidFuzzyController(Node):
         w = self.kp_ang * ang_err + self.ki_ang * self.int_ang + self.kd_ang * der_ang
         w = max(-0.80, min(0.80, w))
 
+        # Limita velocidades e só avança quando o robô está razoavelmente alinhado.
         if abs(ang_err) < 0.45:
             v = self.kp_lin * dist_err + self.ki_lin * self.int_dist + self.kd_lin * der_dist
             v = max(0.0, min(0.16, v))
@@ -131,6 +138,7 @@ class HybridPidFuzzyController(Node):
         return v, w
 
     def compute_fuzzy_avoidance(self):
+        # Regras fuzzy convertem a distância frontal em velocidades contínuas de desvio.
         # Fuzzificação da distância frontal (m)
         f_critico = trapmf(self.front_dist, 0.0, 0.0, 0.22, 0.32)
         f_perto = trimf(self.front_dist, 0.25, 0.36, 0.48)
@@ -155,6 +163,7 @@ class HybridPidFuzzyController(Node):
         return v, w
 
     def control_loop(self):
+        # Calcula erro até a meta; quando chega a 10 cm, para o robô.
         if self.x is None or self.goal_reached:
             return
 
@@ -170,7 +179,7 @@ class HybridPidFuzzyController(Node):
             )
             return
 
-        # Alternância dinâmica entre PID e Fuzzy conforme leitura do LiDAR
+        # O PID aproxima o robô da meta; o Fuzzy assume ao detectar obstáculo frontal.
         if self.mode == 'PID' and self.front_dist < self.enter_fuzzy_dist:
             self.mode = 'FUZZY'
             self.fuzzy_hold_ticks = 12  # Contorna por pelo menos 1.2s para sair da linha do pilar

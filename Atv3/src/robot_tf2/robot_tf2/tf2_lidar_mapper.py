@@ -8,6 +8,7 @@ from tf2_ros import Buffer, TransformListener, TransformException
 import matplotlib.pyplot as plt
 
 
+# Aplica a transformação rígida 3D: rotação pela quaternion e translação da TF.
 def transform_points(pts: np.ndarray, tf_stamped) -> np.ndarray:
     t = tf_stamped.transform
     qx, qy, qz, qw = t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w
@@ -23,12 +24,14 @@ def transform_points(pts: np.ndarray, tf_stamped) -> np.ndarray:
 class Tf2LidarMapper(Node):
     def __init__(self):
         super().__init__('tf2_lidar_mapper')
+        # Buffer armazena TFs recebidas; listener mantém a árvore de transformações atualizada.
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.scan_sub = self.create_subscription(
             LaserScan, '/scan', self.scan_cb, qos_profile_sensor_data
         )
 
+        # Resolução de 3 cm agrupa pontos próximos em células para reduzir duplicatas no mapa.
         self.res = 0.03
         self.voxels = set()
         self.global_pts = []
@@ -57,6 +60,7 @@ class Tf2LidarMapper(Node):
         self.get_logger().info('Mapeador Global TF2 iniciado!')
 
     def scan_cb(self, msg: LaserScan):
+        # Converte cada leitura polar válida do LiDAR para coordenadas cartesianas do sensor.
         src = msg.header.frame_id
         pts = []
         for i, d in enumerate(msg.ranges):
@@ -69,6 +73,7 @@ class Tf2LidarMapper(Node):
             return
         pts_sensor = np.array(pts)
 
+        # Compara o scan nos frames base_link e odom e obtém a pose do robô em odom.
         try:
             tf_base = self.tf_buffer.lookup_transform('base_link', src, rclpy.time.Time())
             tf_odom = self.tf_buffer.lookup_transform('odom', src, rclpy.time.Time())
@@ -77,10 +82,12 @@ class Tf2LidarMapper(Node):
             self.get_logger().warn(f'Aguardando TF2: {ex}', throttle_duration_sec=2.0)
             return
 
+        # TF2 move os pontos do sensor para os frames do robô e do mapa global odom.
         pts_base = transform_points(pts_sensor, tf_base)
         pts_odom = transform_points(pts_sensor, tf_odom)
         self.live_pts = pts_odom[:, :2]
 
+        # Set de índices de voxel evita inserir repetidamente a mesma célula de 3 cm.
         for p in self.live_pts:
             k = (round(float(p[0]) / self.res), round(float(p[1]) / self.res))
             if k not in self.voxels:
@@ -100,6 +107,7 @@ class Tf2LidarMapper(Node):
             )
 
     def update_plot(self):
+        # Atualiza nuvem global, scan atual e trajetória sem bloquear o executor ROS.
         if not self.global_pts:
             return
         self.g_scat.set_offsets(np.array(self.global_pts))

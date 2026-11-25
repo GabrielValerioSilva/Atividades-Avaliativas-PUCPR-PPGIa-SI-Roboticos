@@ -11,12 +11,13 @@ class PidPositionController(Node):
     def __init__(self):
         super().__init__('pid_position_controller')
 
-        # Coordenadas desejadas configuráveis via parâmetro ROS 2
+        # Coordenadas da meta configuráveis sem alterar o arquivo-fonte.
         self.declare_parameter('goal_x', 0.5)
         self.declare_parameter('goal_y', 0.5)
         self.goal_x = float(self.get_parameter('goal_x').value)
         self.goal_y = float(self.get_parameter('goal_y').value)
 
+        # O nó fecha a malha com /odom e publica comandos temporizados em /cmd_vel.
         self.cmd_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
         self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_cb, 10)
 
@@ -25,7 +26,7 @@ class PidPositionController(Node):
         self.yaw = 0.0
         self.goal_reached = False
 
-        # Ganhos PID (Linear e Angular)
+        # Ganhos independentes regulam velocidade linear (distância) e angular (orientação).
         self.kp_lin, self.ki_lin, self.kd_lin = 0.45, 0.02, 0.10
         self.kp_ang, self.ki_ang, self.kd_ang = 1.40, 0.05, 0.20
 
@@ -42,6 +43,7 @@ class PidPositionController(Node):
         )
 
     def odom_cb(self, msg: Odometry):
+        # Atualiza estado do robô; a quaternion é convertida em yaw para o erro de rumo.
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
         q = msg.pose.pose.orientation
@@ -59,6 +61,7 @@ class PidPositionController(Node):
         self.cmd_pub.publish(cmd)
 
     def control_loop(self):
+        # O controlador roda a cada dt e aguarda a primeira mensagem de odometria.
         if self.x is None or self.goal_reached:
             return
 
@@ -66,6 +69,7 @@ class PidPositionController(Node):
         dy = self.goal_y - self.y
         dist_err = math.hypot(dx, dy)
 
+        # A meta é considerada alcançada a até 6 cm; o comando zero interrompe o robô.
         if dist_err <= 0.06:
             self.pub_cmd(0.0, 0.0)
             self.goal_reached = True
@@ -80,7 +84,7 @@ class PidPositionController(Node):
             math.cos(desired_yaw - self.yaw)
         )
 
-        # Termos Integral (com anti-windup) e Derivativo
+        # Limita a integral (anti-windup) e calcula a derivada pela variação do erro.
         self.int_dist = max(-0.5, min(0.5, self.int_dist + dist_err * self.dt))
         der_dist = (dist_err - self.prev_dist) / self.dt
         self.prev_dist = dist_err
@@ -89,10 +93,11 @@ class PidPositionController(Node):
         der_ang = (ang_err - self.prev_ang) / self.dt
         self.prev_ang = ang_err
 
-        # Saída PID saturada nos limites seguros do TurtleBot3
+        # Satura os comandos para limitar velocidade angular e linear.
         w = self.kp_ang * ang_err + self.ki_ang * self.int_ang + self.kd_ang * der_ang
         w = max(-0.75, min(0.75, w))
 
+        # Primeiro alinha o robô; só avança quando o erro angular é menor que 0,45 rad.
         if abs(ang_err) < 0.45:
             v = self.kp_lin * dist_err + self.ki_lin * self.int_dist + self.kd_lin * der_dist
             v = max(0.0, min(0.15, v))

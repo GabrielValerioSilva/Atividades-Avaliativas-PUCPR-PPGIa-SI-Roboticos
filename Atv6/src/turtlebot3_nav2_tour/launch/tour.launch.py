@@ -3,6 +3,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    # Executa o nó no relógio do Gazebo, necessário para timestamps coerentes com o Nav2.
     return LaunchDescription([
         Node(
             package='turtlebot3_nav2_tour',
@@ -11,6 +12,7 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'use_sim_time': True,
+                # Metas de exemplo no frame map: x/y em metros e yaw em radianos.
                 'goal_1_x': -1.0,
                 'goal_1_y': -0.5,
                 'goal_1_yaw': 0.0,

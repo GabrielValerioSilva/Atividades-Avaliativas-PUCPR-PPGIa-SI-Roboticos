@@ -6,14 +6,17 @@ from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import TwistStamped
 
 
+# Navegação reativa: usa leituras atuais do LiDAR para avançar ou escolher um desvio.
 class ReactiveNavigation(Node):
     def __init__(self):
         super().__init__('reactive_navigation')
+        # TwistStamped inclui timestamp e frame; /scan usa QoS apropriado para sensor.
         self.cmd_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
         self.scan_sub = self.create_subscription(
             LaserScan, '/scan', self.scan_callback, qos_profile_sensor_data
         )
 
+        # Parâmetros de movimento e histerese evitam alternância rápida entre modos.
         self.linear_speed = 0.10       # Velocidade suave e constante (m/s)
         self.angular_speed = 0.45      # Giro suave (rad/s)
         self.stop_distance = 0.55      # Começa a desviar abaixo de 0.55 m
@@ -21,15 +24,18 @@ class ReactiveNavigation(Node):
         self.turning = False
         self.turn_dir = 1.0
         self.latest_scan = None
+        # Conta ciclos do timer de 10 Hz para limitar a frequência das mensagens de status.
         self.tick = 0
 
         self.timer = self.create_timer(0.1, self.control_loop)  # Loop fixo a 10 Hz
         self.get_logger().info('Navegação reativa suave iniciada!')
 
     def scan_callback(self, msg: LaserScan):
+        # A leitura mais recente é processada pelo laço de controle periódico.
         self.latest_scan = msg
 
     def publish_cmd(self, linear_x: float, angular_z: float):
+        # Publica velocidades no referencial do robô; linear em m/s e angular em rad/s.
         cmd = TwistStamped()
         cmd.header.stamp = self.get_clock().now().to_msg()
         cmd.header.frame_id = 'base_link'
@@ -38,12 +44,14 @@ class ReactiveNavigation(Node):
         self.cmd_pub.publish(cmd)
 
     def control_loop(self):
+        # Aguarda a primeira varredura para não comandar o robô sem dados do sensor.
         if self.latest_scan is None:
             return
 
         msg = self.latest_scan
         front, left, right = [], [], []
 
+        # Converte cada índice do LaserScan em ângulo e separa frente, esquerda e direita.
         for i, d in enumerate(msg.ranges):
             if math.isinf(d) or math.isnan(d) or d < msg.range_min or d > msg.range_max:
                 continue
@@ -57,16 +65,19 @@ class ReactiveNavigation(Node):
             elif -1.75 <= angle < -0.52:
                 right.append(d)
 
+        # Distância mínima frontal detecta risco; médias laterais comparam espaço para desvio.
         min_front = min(front) if front else msg.range_max
         avg_left = (sum(left) / len(left)) if left else 0.0
         avg_right = (sum(right) / len(right)) if right else 0.0
 
+        # stop_distance inicia o desvio e clear_distance o encerra, criando uma histerese.
         if not self.turning and min_front < self.stop_distance:
             self.turning = True
             self.turn_dir = 1.0 if avg_left >= avg_right else -1.0
         elif self.turning and min_front > self.clear_distance:
             self.turning = False
 
+        # Ao desviar, gira para o lado com maior espaço médio; caso contrário segue em frente.
         if self.turning:
             self.publish_cmd(0.0, self.turn_dir * self.angular_speed)
             status = 'DESVIANDO (ESQ)' if self.turn_dir > 0 else 'DESVIANDO (DIR)'
@@ -80,6 +91,7 @@ class ReactiveNavigation(Node):
 
 
 def main(args=None):
+    # Garante comando de parada ao receber Ctrl+C.
     rclpy.init(args=args)
     node = ReactiveNavigation()
     try:

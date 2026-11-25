@@ -7,6 +7,7 @@ from nav_msgs.msg import Odometry
 #conduzir o robô até a mesma posição desejada
 
 
+# Função de pertinência triangular: retorna o grau de associação entre 0 e 1.
 def trimf(x: float, a: float, b: float, c: float) -> float:
     if x <= a or x >= c:
         return 0.0
@@ -17,6 +18,7 @@ def trimf(x: float, a: float, b: float, c: float) -> float:
     return (c - x) / (c - b) if c > b else 1.0
 
 
+# Função trapezoidal, usada para representar conjuntos com uma faixa de pertinência total.
 def trapmf(x: float, a: float, b: float, c: float, d: float) -> float:
     if x <= a or x >= d:
         return 0.0
@@ -31,11 +33,13 @@ class FuzzyPositionController(Node):
     def __init__(self):
         super().__init__('fuzzy_position_controller')
 
+        # A meta cartesiana pode ser alterada em runtime de inicialização via parâmetros ROS.
         self.declare_parameter('goal_x', -0.5)
         self.declare_parameter('goal_y', -0.5)
         self.goal_x = float(self.get_parameter('goal_x').value)
         self.goal_y = float(self.get_parameter('goal_y').value)
 
+        # /odom fecha a malha de posição; /cmd_vel recebe velocidades com timestamp.
         self.cmd_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
         self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_cb, 10)
 
@@ -51,6 +55,7 @@ class FuzzyPositionController(Node):
         )
 
     def odom_cb(self, msg: Odometry):
+        # Extrai posição e converte a quaternion de orientação para yaw no plano XY.
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
         q = msg.pose.pose.orientation
@@ -68,6 +73,7 @@ class FuzzyPositionController(Node):
         self.cmd_pub.publish(cmd)
 
     def evaluate_fuzzy(self, dist_err: float, ang_err: float):
+        # Fuzzifica erros contínuos em conjuntos linguísticos para ativar regras graduais.
         # 1. Fuzzificação do erro de distância (m)
         d_perto = trapmf(dist_err, -0.1, 0.0, 0.12, 0.35)
         d_medio = trimf(dist_err, 0.15, 0.55, 1.10)
@@ -80,8 +86,9 @@ class FuzzyPositionController(Node):
         a_esq = trimf(ang_err, 0.05, 0.35, 0.75)
         a_esq_f = trapmf(ang_err, 0.45, 0.90, 3.5, 4.0)
 
-        # 3. Base de Regras Fuzzy (Inferência Mamdani - operador min)
+        # 3. Regras fuzzy: mínimo nas premissas e consequentes singleton combinados por média.
         # Regras para velocidade angular (singletons de saída em rad/s)
+        # O mínimo combina antecedentes como AND; a média ponderada combina saídas singleton Sugeno.
         w_rules = [
             (a_dir_f, -0.75),
             (a_dir, -0.38),
@@ -94,6 +101,7 @@ class FuzzyPositionController(Node):
         w_out = (w_num / w_den) if w_den > 0.0 else 0.0
 
         # Regras para velocidade linear (singletons de saída em m/s)
+        # Avanço depende tanto da distância quanto do alinhamento; erro angular grande reduz v.
         v_rules = [
             (min(d_longe, a_centro), 0.15),
             (min(d_medio, a_centro), 0.10),
@@ -110,6 +118,7 @@ class FuzzyPositionController(Node):
         return v_out, w_out
 
     def control_loop(self):
+        # O timer executa a cada 0,1 s; sem odometria ainda não há estado para controlar.
         if self.x is None or self.goal_reached:
             return
 
@@ -117,6 +126,7 @@ class FuzzyPositionController(Node):
         dy = self.goal_y - self.y
         dist_err = math.hypot(dx, dy)
 
+        # Uma tolerância de 6 cm encerra o movimento e publica velocidade zero.
         if dist_err <= 0.06:
             self.pub_cmd(0.0, 0.0)
             self.goal_reached = True
@@ -125,6 +135,7 @@ class FuzzyPositionController(Node):
             )
             return
 
+        # Normaliza o erro angular para escolher o giro mais curto até a meta.
         desired_yaw = math.atan2(dy, dx)
         ang_err = math.atan2(
             math.sin(desired_yaw - self.yaw),
